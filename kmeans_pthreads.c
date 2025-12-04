@@ -149,27 +149,82 @@ void assign_points_to_clusters(Point* points, Point* centroids, int M, int K, in
  * @brief Fase de Atualização: Recalcula a posição de cada centroide como a média
  * (usando divisão inteira) de todos os pontos atribuídos ao seu cluster.
  */
+
+typedef struct {
+    long thread_id;
+    int M, K, D, thread_count;
+    Point *points;
+    long long *global_sums; 
+    int *global_counts;     
+    pthread_mutex_t *lock;
+} UpdateArgs;
+
+void *update_centroids_thread(void *arg) {
+    UpdateArgs *a = (UpdateArgs*) arg;
+    long id = a->thread_id;
+    int local_M = a->M / a->thread_count;
+    int start = id * local_M;
+    int end = (id == a->thread_count - 1) ? a->M : start + local_M;
+
+    long long *local_sums = calloc(a->K * a->D, sizeof(long long));
+    int *local_counts = calloc(a->K, sizeof(int));
+
+    for (int i = start; i < end; i++) {
+        int c = a->points[i].cluster_id;
+        if (c < 0 || c >= a->K) continue;
+        local_counts[c]++;
+        for (int j = 0; j < a->D; j++) {
+            local_sums[c * a->D + j] += a->points[i].coords[j];
+        }
+    }
+
+    pthread_mutex_lock(a->lock);
+    for (int c = 0; c < a->K; c++) {
+        a->global_counts[c] += local_counts[c];
+        for (int j = 0; j < a->D; j++) {
+            a->global_sums[c * a->D + j] += local_sums[c * a->D + j];
+        }
+    }
+    pthread_mutex_unlock(a->lock);
+
+    free(local_sums);
+    free(local_counts);
+    return NULL;
+}
+
 void update_centroids(Point* points, Point* centroids, int M, int K, int D) {
   long long* cluster_sums = (long long*)calloc(K * D, sizeof(long long));
   int* cluster_counts = (int*)calloc(K, sizeof(int));
 
-  for (int i = 0; i < M; i++) {
-    int cluster_id = points[i].cluster_id;
-    cluster_counts[cluster_id]++;
-    for (int j = 0; j < D; j++) {
-      cluster_sums[cluster_id * D + j] += points[i].coords[j];
-    }
-  }
+pthread_t *threads = malloc(thread_count * sizeof(pthread_t));
+    pthread_mutex_t lock;
+    pthread_mutex_init(&lock, NULL);
+    UpdateArgs *args = malloc(thread_count * sizeof(UpdateArgs));
 
-  for (int i = 0; i < K; i++) {
-    if (cluster_counts[i] > 0) {
-      for (int j = 0; j < D; j++) {
-        // Divisão inteira para manter os centroides em coordenadas discretas
-        centroids[i].coords[j] = cluster_sums[i * D + j] / cluster_counts[i];
-      }
+    for (long t = 0; t < thread_count; t++) {
+        args[t].thread_id = t;
+        args[t].M = M;
+        args[t].K = K;
+        args[t].D = D;
+        args[t].thread_count = thread_count;
+        args[t].points = points;
+        args[t].global_sums = cluster_sums;
+        args[t].global_counts = cluster_counts;
+        args[t].lock = &lock;
+        pthread_create(&threads[t], NULL, update_centroids_thread, &args[t]);
     }
-  }
+    for (int t = 0; t < thread_count; t++) pthread_join(threads[t], NULL);
+    pthread_mutex_destroy(&lock);
 
+    for (int c = 0; c < K; c++) {
+        if (cluster_counts[c] > 0) {
+            for (int j = 0; j < D; j++) {
+                centroids[c].coords[j] = (int)(cluster_sums[c * D + j] / cluster_counts[c]);
+            }
+        }
+    }
+  free(threads);
+  free(args);
   free(cluster_sums);
   free(cluster_counts);
 }
