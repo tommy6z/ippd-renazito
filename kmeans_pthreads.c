@@ -5,6 +5,7 @@
 #include <string.h>
 #include <time.h>  // Header correto para clock_gettime e struct timespec
 #include <pthread.h>
+#include <unistd.h>
 
 long thread_count;
 
@@ -270,8 +271,8 @@ void print_time_and_checksum(Point* centroids, int K, int D, double exec_time) {
 
 int main(int argc, char* argv[]) {
   // Validação e leitura dos argumentos de linha de comando
-  if (argc != 7) {
-    fprintf(stderr, "Uso: %s <arquivo_dados> <M_pontos> <D_dimensoes> <K_clusters> <I_iteracoes> <threads>\n", argv[0]);
+  if (argc < 6) {
+    fprintf(stderr, "Uso: %s <arquivo_dados> <M_pontos> <D_dimensoes> <K_clusters> <I_iteracoes> [threads]\n", argv[0]);
     return EXIT_FAILURE;
   }
 
@@ -280,8 +281,12 @@ int main(int argc, char* argv[]) {
   const int D = atoi(argv[3]);     // Número de dimensões
   const int K = atoi(argv[4]);     // Número de clusters
   const int I = atoi(argv[5]);     // Número de iterações
-  thread_count = atol(argv[6]);
 
+  if (argc >= 7) {
+        thread_count = atol(argv[6]);
+    } else {
+        thread_count = sysconf(_SC_NPROCESSORS_ONLN); // número de cores disponíveis
+    }
 
   if (M <= 0 || D <= 0 || K <= 0 || I <= 0 || K > M) {
     fprintf(stderr, "Erro nos parâmetros. Verifique se M,D,K,I > 0 e K <= M.\n");
