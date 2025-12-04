@@ -167,7 +167,6 @@ void print_time_and_checksum(Point* centroids, int K, int D, double exec_time) {
 }
 
 // --- Função Principal ---
-
 int main(int argc, char* argv[]) {
 
     MPI_Init(&argc, &argv);
@@ -194,21 +193,30 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  //a alocação de memória antiga estava causando comportamento indesejado.
-
   // --- Alocação de Memória ---
-  int* all_coords = NULL;                     // só rank 0 aloca para leitura do arquivo
-  Point* points = NULL;                      // só rank 0 usa essa estrutura completa
+  int* all_coords = NULL;       // só rank 0 aloca para leitura do arquivo
+  Point* points = NULL;         // só rank 0 usa essa estrutura completa
+  int* centroids_coords = NULL; // centroides
+  Point* centroids = NULL;
 
   if (rank == 0) 
   {
+    // aloca pontos
     all_coords = (int*)malloc(M * D * sizeof(int));
     points = (Point*)malloc(M * sizeof(Point));
     for (int i = 0; i < M; i++) 
-    {
-      points[i].coords = &all_coords[i * D];
-    }
-  }
+        points[i].coords = &all_coords[i * D];
+
+    read_data_from_file(filename, points, M, D);
+
+    // aloca e inicializa centroides diretamente
+    centroids_coords = (int*)malloc(K * D * sizeof(int));
+    centroids = (Point*)malloc(K * sizeof(Point));
+    for (int i = 0; i < K; i++)
+        centroids[i].coords = &centroids_coords[i * D];
+
+    initialize_centroids(points, centroids, M, K, D);
+}
 
   //calculando a divisão dos pontos entre processos
   int base = M/size;
@@ -233,31 +241,17 @@ int main(int argc, char* argv[]) {
     local_points[i].coords = &local_coords[i * D];
   }
 
-  // só rank 0 lê e inicializa centróides temporários
-  if (rank == 0) 
-  {
-    read_data_from_file(filename, points, M, D);
-    initialize_centroids(points, points, M, K, D);  // centroides ficam nos primeiros K pontos temporariamente
-  }
-
   //distribuindo pontos
   MPI_Scatterv(all_coords, sendcounts, displs, MPI_INT, local_coords, local_M * D, MPI_INT, 0, MPI_COMM_WORLD );
 
   // --- Centroides com memória local válida em TODOS os processos ---
-  int* centroids_coords = malloc(K * D * sizeof(int));
-  Point* centroids = malloc(K * sizeof(Point));
-  for (int i = 0; i < K; i++) 
+  // já foram alocados no rank 0, os outros recebem a memória via Bcast
+  if (rank != 0) 
   {
-    centroids[i].coords = &centroids_coords[i * D];
-  }
-
-  // rank 0 copia os centroides iniciais para o buffer local que será enviado
-  if (rank == 0) 
-  {
-    for (int i = 0; i < K; i++) 
-    {
-      memcpy(centroids[i].coords, points[i].coords, D * sizeof(int));
-    }
+      centroids_coords = (int*)malloc(K * D * sizeof(int));
+      centroids = (Point*)malloc(K * sizeof(Point));
+      for (int i = 0; i < K; i++)
+          centroids[i].coords = &centroids_coords[i * D];
   }
 
   //broadcast dos centroides iniciais (agora todos têm memória válida!)
@@ -278,16 +272,13 @@ int main(int argc, char* argv[]) {
   MPI_Barrier(MPI_COMM_WORLD);
   double t0 = MPI_Wtime();
 
-  // --- Medição de Tempo do Algoritmo Principal ---
-  //struct timespec start, end;
-  //clock_gettime(CLOCK_MONOTONIC, &start);  // Inicia o cronômetro
-
   // laço principal do K-Means
   for (int iter = 0; iter < I; iter++) 
   {
     //zerando parciais locais
     memset(local_sums, 0, sizeof(long long) * K * D);
     memset(local_counts, 0, sizeof(int) * K);
+
     //1.cada rank usa seus pontos locais 
     for (int i = 0; i < local_M; i++) 
     {
@@ -306,26 +297,7 @@ int main(int argc, char* argv[]) {
       }
     }
 
-    /*//2.agregar resultados no rank 0 (reduction)
-    MPI_Reduce(local_sums, global_sums, K * D, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
-    MPI_Reduce(local_counts, global_counts, K, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
-
-    //3. rank 0 atualiza centroides (escreve em all_coords e M*D)
-    if (rank == 0) 
-    {
-      for (int c = 0; c < K; c++) 
-      {
-        if (global_counts[c] > 0) 
-        {
-          for (int j = 0; j < D; j++) 
-          {
-            centroids[c].coords[j] = (int)(global_sums[c * D + j] / global_counts[c]);
-          }
-        }
-        // se global_counts[c] == 0: mantém o centroide anterior 
-    }*/
-
-    //tentando eliminar o Broadcast agrupando parciais globalmente em todos os ranks para otimização
+    // agregando resultados globalmente
     MPI_Allreduce(local_sums, global_sums, K * D, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
     MPI_Allreduce(local_counts, global_counts, K, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 
@@ -336,24 +308,16 @@ int main(int argc, char* argv[]) {
       {
         for (int j = 0; j < D; j++) 
         {
-          centroids_coords[c * D + j] = (int)(global_sums[c * D + j] / global_counts[c]);
+          centroids[c].coords[j] = (int)(global_sums[c * D + j] / global_counts[c]);
         }
       }
-      // cluster vazio mantém o centroide anterior (comportamento padrão do K-means)
     }
-    //fim da iteração
   }
-
-  //clock_gettime(CLOCK_MONOTONIC, &end);  // Para o cronômetro
-
-  // Calcula o tempo decorrido em segundos
-  //double time_taken = (end.tv_sec - start.tv_sec) + 1e-9 * (end.tv_nsec - start.tv_nsec);
 
   //sincroniza e mede tempo final
   MPI_Barrier(MPI_COMM_WORLD);
   double t1 = MPI_Wtime();
   double time_taken = t1 - t0;
-
 
   // --- Apresentação dos Resultados ---
   if (rank == 0) 
@@ -372,6 +336,7 @@ int main(int argc, char* argv[]) {
   free(global_counts);
   free(all_coords);
   free(points);
+  free(centroids_coords);
   free(centroids);
 
   MPI_Finalize();
