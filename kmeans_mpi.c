@@ -1,10 +1,13 @@
+//Paralelização do Problema K-means através de MPI
+//Fábio A. de Siqueira
+
 #define _POSIX_C_SOURCE 199309L  // Necessário para CLOCK_MONOTONIC
 #include <limits.h>              // Para LLONG_MAX
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>  // Header correto para clock_gettime e struct timespec
-#include <mpi.h> // @F incluindo o MPI
+#include <mpi.h> // incluindo o MPI
 
 // Estrutura para representar um ponto no espaço D-dimensional
 typedef struct {
@@ -280,7 +283,7 @@ double t0 = MPI_Wtime();
       }
     }
 
-    //2.agregar resultados no rank 0 (reduction)
+    /*//2.agregar resultados no rank 0 (reduction)
     MPI_Reduce(local_sums, global_sums, K * D, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
     MPI_Reduce(local_counts, global_counts, K, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
 
@@ -297,13 +300,27 @@ double t0 = MPI_Wtime();
           }
         }
         // se global_counts[c] == 0: mantém o centroide anterior 
+    }*/
+
+    //tentando eliminar o Broadcast agrupando parciais globalmente em todos os ranks para otimização
+    MPI_Allreduce(local_sums, global_sums, K * D, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(local_counts, global_counts, K, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+
+    // todos os ranks agora recalculam os centroides
+    for (int c = 0; c < K; c++) 
+    {
+      if (global_counts[c] > 0) 
+      {
+        for (int j = 0; j < D; j++) 
+        {
+          centroids[c].coords[j] = (int)(global_sums[c * D + j] / global_counts[c]);
+          all_coords[(M + c) * D + j] = centroids[c].coords[j]; // manter memória consistente
+        }
       }
     }
-
-    //4. rank 0 transmite os centroides atualizados para todos 
-    MPI_Bcast(all_coords + M * D, K * D, MPI_INT, 0, MPI_COMM_WORLD);
+    //MPI_Bcast(all_coords + M * D, K * D, MPI_INT, 0, MPI_COMM_WORLD); \\broadcast arrebatado
     //fim da iteração
-}
+  }
 
   //clock_gettime(CLOCK_MONOTONIC, &end);  // Para o cronômetro
 
