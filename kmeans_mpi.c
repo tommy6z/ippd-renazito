@@ -252,32 +252,32 @@ if (!local_sums || !global_sums || !local_counts || !global_counts)
 MPI_Barrier(MPI_COMM_WORLD);
 double t0 = MPI_Wtime();
 
-
   // --- Medição de Tempo do Algoritmo Principal ---
-  struct timespec start, end;
-  clock_gettime(CLOCK_MONOTONIC, &start);  // Inicia o cronômetro
+  //struct timespec start, end;
+  //clock_gettime(CLOCK_MONOTONIC, &start);  // Inicia o cronômetro
 
   // laço principal do K-Means
-  for (int iter = 0; iter < I; iter++) {
+  for (int iter = 0; iter < I; iter++) 
+  {
     //zerando parciais locais
     memset(local_sums, 0, sizeof(long long) * K * D);
     memset(local_counts, 0, sizeof(int) * K);
     //1.cada rank usa seus pontos locais 
     for (int i = 0; i < local_M; i++) 
     {
-        long long min_dist = LLONG_MAX;
-        int best_cluster = -1;
-        for (int c = 0; c < K; c++) 
-        {
-            long long dist = euclidean_dist_sq(&local_points[i], &centroids[c], D);
-            if (dist < min_dist) { min_dist = dist; best_cluster = c; }
-        }
-        local_points[i].cluster_id = best_cluster;
-        local_counts[best_cluster]++;
-        for (int j = 0; j < D; j++) 
-        {
-            local_sums[best_cluster * D + j] += local_points[i].coords[j];
-        }
+      long long min_dist = LLONG_MAX;
+      int best_cluster = -1;
+      for (int c = 0; c < K; c++) 
+      {
+        long long dist = euclidean_dist_sq(&local_points[i], &centroids[c], D);
+        if (dist < min_dist) { min_dist = dist; best_cluster = c; }
+      }
+      local_points[i].cluster_id = best_cluster;
+      local_counts[best_cluster]++;
+      for (int j = 0; j < D; j++) 
+      {
+        local_sums[best_cluster * D + j] += local_points[i].coords[j];
+      }
     }
 
     //2.agregar resultados no rank 0 (reduction)
@@ -287,17 +287,17 @@ double t0 = MPI_Wtime();
     //3. rank 0 atualiza centroides (escreve em all_coords e M*D)
     if (rank == 0) 
     {
-        for (int c = 0; c < K; c++) 
+      for (int c = 0; c < K; c++) 
+      {
+        if (global_counts[c] > 0) 
         {
-            if (global_counts[c] > 0) 
-            {
-                for (int j = 0; j < D; j++) 
-                {
-                    centroids[c].coords[j] = (int)(global_sums[c * D + j] / global_counts[c]);
-                }
-            }
-            // se global_counts[c] == 0: mantém o centroide anterior 
+          for (int j = 0; j < D; j++) 
+          {
+            centroids[c].coords[j] = (int)(global_sums[c * D + j] / global_counts[c]);
+          }
         }
+        // se global_counts[c] == 0: mantém o centroide anterior 
+      }
     }
 
     //4. rank 0 transmite os centroides atualizados para todos 
@@ -305,15 +305,32 @@ double t0 = MPI_Wtime();
     //fim da iteração
 }
 
-  clock_gettime(CLOCK_MONOTONIC, &end);  // Para o cronômetro
+  //clock_gettime(CLOCK_MONOTONIC, &end);  // Para o cronômetro
 
   // Calcula o tempo decorrido em segundos
-  double time_taken = (end.tv_sec - start.tv_sec) + 1e-9 * (end.tv_nsec - start.tv_nsec);
+  //double time_taken = (end.tv_sec - start.tv_sec) + 1e-9 * (end.tv_nsec - start.tv_nsec);
+
+  //sincroniza e mede tempo final
+  MPI_Barrier(MPI_COMM_WORLD);
+  double t1 = MPI_Wtime();
+  double time_taken = t1 - t0;
+
 
   // --- Apresentação dos Resultados ---
-  print_time_and_checksum(centroids, K, D, time_taken);
+  if (rank == 0) 
+  {
+    print_time_and_checksum(centroids, K, D, time_taken);
+  }
 
   // --- Limpeza ---
+  free(sendcounts);
+  free(displs);
+  free(local_coords);
+  free(local_points);
+  free(local_sums);
+  free(global_sums);
+  free(local_counts);
+  free(global_counts);
   free(all_coords);
   free(points);
   free(centroids);
