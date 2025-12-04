@@ -203,19 +203,107 @@ int main(int argc, char* argv[]) {
     centroids[i].coords = &all_coords[(M + i) * D];
   }
 
-  // --- Preparação (Fora da medição de tempo) ---
-  read_data_from_file(filename, points, M, D);
-  initialize_centroids(points, centroids, M, K, D);
+  //movendo read_data_from_file somente para o rank 0
+  if (rank == 0) {
+    read_data_from_file(filename, points, M, D);
+    initialize_centroids(points, centroids, M, K, D);
+}
+  //calculando a divisão dos pontos entre processos
+  int base = M/size;
+  int resto = M % size;
+  int local_M = base + (rank < resto ? 1 : 0);
+  int* displs = malloc(size * sizeof(int));
+  int* sendcounts = malloc(size * sizeof(int));
+  int sum = 0;
+  for (int i=0; i<size; i++) 
+  {
+    int m_i = base + (i < resto ? 1 : 0);
+    sendcounts[i] = m_i * D;
+    displs[i] = sum;
+    sum += m_i * D;
+  }
+
+  //buffers reginais dos pontos dum processo
+  int* local_coords = malloc(local_M * D * sizeof(int));
+  Point* local_points = malloc(local_M * sizeof(Point));
+  for (int i = 0; i < local_M; i++)
+  {
+    local_points[i].coords = &local_coords[i * D];
+  }
+
+  //distribuindo pontos
+  MPI_Scatterv(all_coords, sendcounts, displs, MPI_INT, local_coords, local_M * D, MPI_INT, 0, MPI_COMM_WORLD );
+
+  //broaadcast dos centroides primarios
+  MPI_Bcast(all_coords + M * D, K * D, MPI_INT, 0, MPI_COMM_WORLD);
+
+//buffers para soma e contagem 
+long long *local_sums = (long long*)calloc(K * D, sizeof(long long));
+long long *global_sums = (long long*)calloc(K * D, sizeof(long long));
+int *local_counts = (int*)calloc(K, sizeof(int));
+int *global_counts = (int*)calloc(K, sizeof(int));
+if (!local_sums || !global_sums || !local_counts || !global_counts) 
+{
+    fprintf(stderr, "Erro: calloc falhou para buffers de soma/contagem\n");
+    MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+}
+
+// sincroniza e mede tempo com MPI_Wtime 
+MPI_Barrier(MPI_COMM_WORLD);
+double t0 = MPI_Wtime();
+
 
   // --- Medição de Tempo do Algoritmo Principal ---
   struct timespec start, end;
   clock_gettime(CLOCK_MONOTONIC, &start);  // Inicia o cronômetro
 
-  // Laço principal do K-Means (A única parte que será medida)
+  // laço principal do K-Means
   for (int iter = 0; iter < I; iter++) {
-    assign_points_to_clusters(points, centroids, M, K, D);
-    update_centroids(points, centroids, M, K, D);
-  }
+    //zerando parciais locais
+    memset(local_sums, 0, sizeof(long long) * K * D);
+    memset(local_counts, 0, sizeof(int) * K);
+    //1.cada rank usa seus pontos locais 
+    for (int i = 0; i < local_M; i++) 
+    {
+        long long min_dist = LLONG_MAX;
+        int best_cluster = -1;
+        for (int c = 0; c < K; c++) 
+        {
+            long long dist = euclidean_dist_sq(&local_points[i], &centroids[c], D);
+            if (dist < min_dist) { min_dist = dist; best_cluster = c; }
+        }
+        local_points[i].cluster_id = best_cluster;
+        local_counts[best_cluster]++;
+        for (int j = 0; j < D; j++) 
+        {
+            local_sums[best_cluster * D + j] += local_points[i].coords[j];
+        }
+    }
+
+    //2.agregar resultados no rank 0 (reduction)
+    MPI_Reduce(local_sums, global_sums, K * D, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(local_counts, global_counts, K, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    //3. rank 0 atualiza centroides (escreve em all_coords e M*D)
+    if (rank == 0) 
+    {
+        for (int c = 0; c < K; c++) 
+        {
+            if (global_counts[c] > 0) 
+            {
+                for (int j = 0; j < D; j++) 
+                {
+                    centroids[c].coords[j] = (int)(global_sums[c * D + j] / global_counts[c]);
+                }
+            }
+            // se global_counts[c] == 0: mantém o centroide anterior 
+        }
+    }
+
+    //4. rank 0 transmite os centroides atualizados para todos 
+    MPI_Bcast(all_coords + M * D, K * D, MPI_INT, 0, MPI_COMM_WORLD);
+    //fim da iteração
+}
 
   clock_gettime(CLOCK_MONOTONIC, &end);  // Para o cronômetro
 
@@ -230,6 +318,6 @@ int main(int argc, char* argv[]) {
   free(points);
   free(centroids);
 
-  return EXIT_SUCCESS;
   MPI_Finalize();
+  return EXIT_SUCCESS;
 }
